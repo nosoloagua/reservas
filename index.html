@@ -441,23 +441,31 @@ function renderMap(){
     }
     TABLES.filter(t=>t.z===zone.key).forEach(t=>{
       const r=getRes(t.n);
-      const est=r? r.estado : "Livre";
+      let est=r? r.estado : "Livre";
+      // Se esta mesa pertence a um grupo, herda o estado/cliente da principal
+      const ref = r && r.grupoDe ? getRes(r.grupoDe) : null;
       const el=document.createElement('div');
-      el.className='table '+(STATE_CLASS[est]||'s-livre');
+      const shownEst = ref ? ref.estado : est;
+      el.className='table '+(STATE_CLASS[shownEst]||'s-livre');
       el.style.gridColumn=t.col; el.style.gridRow=t.row;
       let inner=`<div class="dot"></div><div class="name">${t.n}</div><div class="cap">${t.cap}p</div>`;
-      if(r && est!=="Livre"){
+      if(ref){
+        // mesa secundária de um grupo
+        inner+=`<div class="who">${ref.cliente||'—'}</div><div class="amt">+ grupo (${r.grupoDe})</div>`;
+      }else if(r && est!=="Livre"){
         if(est==="Bloqueada"){
           inner+=`<div class="who">Bloqueada</div>`;
         }else{
+          const grupoMesas = r.grupo && r.grupo.length ? [t.n, ...r.grupo] : null;
           inner+=`<div class="who">${r.cliente||'—'}</div>`;
           const c=consumoOf(r);
-          inner+=`<div class="amt">${r.hora?r.hora+' · ':''}${r.pax||0}p${r.cortesia?' · cortesia':''}</div>`;
+          const paxTxt = grupoMesas ? `${r.pax||0}p · ${grupoMesas.length} mesas` : `${r.pax||0}p`;
+          inner+=`<div class="amt">${r.hora?r.hora+' · ':''}${paxTxt}${r.cortesia?' · cortesia':''}</div>`;
           mesas++; pax+=(+r.pax||0); cons+=c; sinal+=(+r.sinal||0);
         }
       }
       el.innerHTML=inner;
-      el.onclick=()=>openSheet(t.n);
+      el.onclick=()=> ref ? openSheet(r.grupoDe) : openSheet(t.n);
       plan.appendChild(el);
     });
     wrap.appendChild(plan);
@@ -506,7 +514,20 @@ function openSheet(tName){
         </div>
       </div>
       <div class="field"><label>Reserva feita por</label><input id="f_feitapor" value="${r.feitaPor||''}" placeholder="O teu nome"></div>
-      <div class="field"><label>Mesas juntas / Obs.</label><textarea id="f_obs" rows="2" placeholder="Ex.: 100+102 juntas">${r.obs||''}</textarea></div>
+      <div class="field"><label>Juntar mesas (mesmo cliente)</label>
+        <div class="swapgrid" id="grupoGrid">
+          ${TABLES.filter(x=>x.n!==tName).map(x=>{
+            const xr=getRes(x.n);
+            const isMine = r.grupo && r.grupo.includes(x.n);
+            const livre = !xr || (xr.grupoDe===tName);
+            const sel = isMine ? 'occ' : 'free';
+            const dis = (!livre && !isMine) ? 'disabled' : '';
+            const on = isMine ? 'style="border-color:var(--accent);background:rgba(21,184,166,.16)"' : '';
+            return `<button type="button" class="swapcell ${sel}" data-mesa="${x.n}" ${dis} ${on}><b>${x.n}</b><span>${(!livre&&!isMine)?'ocupada':(isMine?'no grupo':'juntar')}</span></button>`;
+          }).join('')}
+        </div>
+      </div>
+      <div class="field"><label>Obs.</label><textarea id="f_obs" rows="2" placeholder="Notas">${r.obs||''}</textarea></div>
     </div>
     <div class="actions">
       <button class="btn btn-ghost" id="cancelBtn">Cancelar</button>
@@ -538,27 +559,46 @@ function openSheet(tName){
   };
   cort.onchange=applyCort; applyCort();
   $('f_pax').oninput=calcEuro; $('f_cons').oninput=calcEuro; calcEuro();
+  // seleção de mesas do grupo
+  let grupoSel = (r.grupo||[]).slice();
+  $('grupoGrid').querySelectorAll('.swapcell').forEach(b=>{
+    if(b.hasAttribute('disabled')) return;
+    b.onclick=()=>{
+      const m=b.dataset.mesa;
+      if(grupoSel.includes(m)){ grupoSel=grupoSel.filter(x=>x!==m); b.style.borderColor=''; b.style.background=''; b.querySelector('span').textContent='juntar'; }
+      else{ grupoSel.push(m); b.style.borderColor='var(--accent)'; b.style.background='rgba(21,184,166,.16)'; b.querySelector('span').textContent='no grupo'; }
+    };
+  });
   $('cancelBtn').onclick=closeSheet;
   $('saveBtn').onclick=()=>{
-    if(selEstado==="Livre"){ delete (data[currentDate]||{})[tName]; }
+    const res = data[currentDate] || (data[currentDate]={});
+    // limpar referências antigas deste grupo (mesas que já não pertencem)
+    const antigas = (r.grupo||[]);
+    antigas.forEach(m=>{ if(res[m] && res[m].grupoDe===tName) delete res[m]; });
+    if(selEstado==="Livre"){ delete res[tName]; }
     else{
-      if(!data[currentDate]) data[currentDate]={};
       const paxV=+$('f_pax').value||0;
       const isCort=cort.checked;
       const consV= isCort ? 0 : (+$('f_cons').value||0);
       const euroV = (paxV>0 && consV>0) ? Math.round(consV/paxV) : 0;
-      data[currentDate][tName]={
+      res[tName]={
         cliente:$('f_cliente').value.trim(), telefone:$('f_tel').value.trim(), hora:$('f_hora').value,
         pax:paxV, euro:euroV, consumo:consV, sinal:+$('f_sinal').value||0,
         cortesia:isCort, autorizado: isCort ? $('f_autor').value.trim() : '',
         feitaPor:$('f_feitapor').value.trim(),
-        promotor:$('f_prom').value, estado:selEstado, obs:$('f_obs').value.trim()
+        promotor:$('f_prom').value, estado:selEstado, obs:$('f_obs').value.trim(),
+        grupo: grupoSel.slice()
       };
+      // marcar as mesas secundárias do grupo
+      grupoSel.forEach(m=>{ res[m]={grupoDe:tName, estado:selEstado}; });
     }
-    saveAll(); renderMap(); closeSheet(); toast("Guardado");
+    saveAll(); renderMap(); closeSheet(); toast(grupoSel.length?"Grupo guardado":"Guardado");
   };
   const fb=$('freeBtn'); if(fb) fb.onclick=()=>{
-    delete (data[currentDate]||{})[tName]; saveAll(); renderMap(); closeSheet(); toast("Mesa libertada");
+    const res=data[currentDate]||{};
+    // libertar também as mesas do grupo
+    (r.grupo||[]).forEach(m=>{ if(res[m] && res[m].grupoDe===tName) delete res[m]; });
+    delete res[tName]; saveAll(); renderMap(); closeSheet(); toast("Mesa libertada");
   };
   const swb=$('swapBtn'); if(swb) swb.onclick=()=>openSwap(tName);
   $('scrim').classList.add('open'); $('sheet').classList.add('open');
@@ -597,7 +637,7 @@ function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('sho
 
 function showList(){
   const res=data[currentDate]||{};
-  const keys=Object.keys(res).filter(k=>res[k].estado!=="Livre");
+  const keys=Object.keys(res).filter(k=>res[k].estado!=="Livre" && !res[k].grupoDe);
   let html=`<h2>Lista do dia</h2><div class="h-sub">${fmtDate(currentDate)}</div>`;
   if(keys.length===0){ html+=`<div class="empty">Sem reservas para esta data.</div>`; }
   else{
@@ -605,8 +645,9 @@ function showList(){
     html+=keys.map(k=>{
       const r=res[k]; const c=consumoOf(r);
       const consTxt = r.cortesia ? 'Cortesia' : eur(c);
+      const grupoTxt = r.grupo && r.grupo.length ? `Mesas ${[k, ...r.grupo].join(' + ')}` : `Mesa ${k}`;
       return `<div class="calc" style="color:var(--text); margin-bottom:10px">
-        <div style="display:flex; justify-content:space-between"><b style="font-size:15px">Mesa ${k}</b><span style="color:var(--muted); font-size:12px">${r.estado}</span></div>
+        <div style="display:flex; justify-content:space-between"><b style="font-size:15px">${grupoTxt}</b><span style="color:var(--muted); font-size:12px">${r.estado}</span></div>
         <div style="font-size:13px; margin-top:4px">${r.cliente||r.obs||'—'}${r.telefone?' · '+r.telefone:''}</div>
         <div style="font-size:12px; color:var(--muted); margin-top:2px">${r.hora?r.hora+' · ':''}${r.pax||0} pax · ${consTxt}${r.sinal?' · sinal '+eur(r.sinal):''}${r.promotor?' · '+r.promotor:''}</div>
         ${r.cortesia&&r.autorizado?`<div style="font-size:12px; color:var(--bloq); margin-top:2px">Autorizado por ${r.autorizado}</div>`:''}
@@ -631,12 +672,17 @@ function printMap(){
     TABLES.filter(t=>t.z===zone.key).forEach(t=>{
       const r=res[t.n];
       let body='', cls='pfree';
-      if(r && r.estado!=="Livre"){
+      if(r && r.grupoDe){
+        const ref=res[r.grupoDe];
+        body=`<div class="pn">${t.n}</div><div class="pcli">${ref?ref.cliente||'—':'—'}</div><div class="pc">+ grupo (${r.grupoDe})</div>`;
+        cls = ref && ref.estado==="Confirmada"?'pconf':'psinal';
+      }else if(r && r.estado!=="Livre"){
         if(r.estado==="Bloqueada"){ body='<div class="pn">'+t.n+'</div><div class="pc">Bloqueada</div>'; cls='pbloq'; }
         else{
           const c=consumoOf(r);
           const val = r.cortesia ? 'Cortesia' : eur(c);
-          body=`<div class="pn">${t.n}</div><div class="pcli">${r.cliente||'—'}</div><div class="pc">${r.pax||0} pax · ${val}${r.hora?' · '+r.hora:''}</div>`;
+          const gtxt = r.grupo && r.grupo.length ? ` · grupo ${[t.n,...r.grupo].join('+')}` : '';
+          body=`<div class="pn">${t.n}</div><div class="pcli">${r.cliente||'—'}</div><div class="pc">${r.pax||0} pax · ${val}${r.hora?' · '+r.hora:''}${gtxt}</div>`;
           cls = r.estado==="Confirmada"?'pconf':'psinal';
           mesas++; pax+=(+r.pax||0); cons+=c;
         }
@@ -677,12 +723,13 @@ function printMap(){
 
 function shareWhats(){
   const res=data[currentDate]||{};
-  const keys=Object.keys(res).filter(k=>res[k].estado!=="Livre" && res[k].estado!=="Bloqueada");
+  const keys=Object.keys(res).filter(k=>res[k].estado!=="Livre" && res[k].estado!=="Bloqueada" && !res[k].grupoDe);
   let pax=0,cons=0;
   let lines=keys.sort().map(k=>{
     const r=res[k]; const c=consumoOf(r); pax+=(+r.pax||0); cons+=c;
     const val = r.cortesia ? 'cortesia'+(r.autorizado?' ('+r.autorizado+')':'') : eur(c);
-    return `• Mesa ${k}: ${r.cliente||'—'} (${r.pax||0}px, ${val})${r.hora?' — '+r.hora:''}`;
+    const mesaTxt = r.grupo && r.grupo.length ? [k, ...r.grupo].join('+') : k;
+    return `• Mesa ${mesaTxt}: ${r.cliente||'—'} (${r.pax||0}px, ${val})${r.hora?' — '+r.hora:''}`;
   });
   let txt=`🌊 NoSoloÁgua VIP — ${fmtDate(currentDate)}\n`;
   const ev=getEvento(currentDate);
